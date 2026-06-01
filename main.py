@@ -31,7 +31,8 @@ diag = {
     "gps_fix_acquired": 0,   # nb d'acquisitions de fix GPS
     "gps_fix_lost": 0,       # nb de pertes de fix
     "gps_reconnects": 0,     # nb de reconnexions du port GPS
-    "gps_read_errors": 0,    # nb d'erreurs de lecture GPS
+    "gps_read_errors": 0,    # nb d'erreurs d'I/O série GPS (→ reconnexion)
+    "gps_parse_errors": 0,   # nb de trames NMEA illisibles (ignorées, pas de reconnexion)
     "wemos_reconnects": 0,   # nb de reconnexions du Wemos
     "relay_send_ok": 0,      # nb d'ordres relais envoyés avec succès
     "relay_send_fail": 0,    # nb d'ordres relais non envoyés (Wemos absent)
@@ -88,9 +89,24 @@ def get_spotify_client_sync():
                 lines = [l for l in lines if not l.startswith("SPOTIFY_REFRESH_TOKEN")]
                 lines.append(f"SPOTIFY_REFRESH_TOKEN={new_rt}")
                 env_path.write_text("\n".join(lines) + "\n")
-        return spotipy.Spotify(auth=_spotify_token_info["access_token"])
+        # requests_timeout : sinon un réseau lent (fréquent en bateau) peut faire
+        # traîner les appels Spotify indéfiniment.
+        return spotipy.Spotify(auth=_spotify_token_info["access_token"], requests_timeout=5)
     except Exception:
         return None
+
+
+def _fetch_now_playing_sync(sp_client):
+    """Récupère le titre/artiste en cours (appel réseau bloquant — à exécuter
+    dans un thread, jamais directement dans l'event loop)."""
+    current = sp_client.current_playback()
+    item = current['item'] if current else None
+    if item:
+        # Un titre a 'artists' ; une pub ou un épisode de podcast peut ne pas
+        # en avoir → on évite le KeyError.
+        artists = item.get('artists') or []
+        return item.get('name', ''), (artists[0]['name'] if artists else '')
+    return "Pas de lecture en cours", ""
 
 async def get_spotify_client():
     """Version async : exécute get_spotify_client_sync dans un thread avec timeout."""
@@ -307,8 +323,26 @@ async def read_gps():
                 boat_data["gps_fix"] = False
                 await asyncio.sleep(5)
                 continue
+        # 1) Lecture série : une erreur ici = port perdu → reconnexion.
         try:
             raw = await loop.run_in_executor(None, gps_serial.readline)
+        except Exception as e:
+            diag["gps_read_errors"] += 1
+            log.warning("Lecture GPS échouée : %s — reconnexion.", e)
+            try:
+                gps_serial.close()
+            except Exception:
+                pass
+            gps_serial = None
+            gps_has_fix = False
+            boat_data["gps_fix"] = False
+            await asyncio.sleep(1)
+            continue
+
+        # 2) Parsing de la trame : une trame bruitée/corrompue (fréquent sur une
+        # liaison série) est simplement IGNORÉE — surtout pas de reconnexion,
+        # sinon le moindre parasite ferait perdre le fix.
+        try:
             line = raw.decode('ascii', errors='ignore').strip()
             # Les puces GPS seul émettent $GPRMC ; les u-blox multi-constellation
             # (GPS+GLONASS+Galileo) émettent $GNRMC. On accepte les deux, sinon
@@ -339,19 +373,9 @@ async def read_gps():
                 boat_data["vitesse"] = round(speed_knots, 1)
                 boat_data["gps_fix"] = True
                 gps_has_fix = True
-        except Exception as e:
-            # Port probablement perdu (USB débranché) : on l'invalide pour
-            # déclencher une reconnexion à la prochaine itération.
-            diag["gps_read_errors"] += 1
-            log.warning("Lecture GPS échouée : %s — reconnexion.", e)
-            try:
-                gps_serial.close()
-            except Exception:
-                pass
-            gps_serial = None
-            gps_has_fix = False
-            boat_data["gps_fix"] = False
-            await asyncio.sleep(1)
+        except Exception:
+            diag["gps_parse_errors"] += 1
+            continue
 
 # ---------------------------------------------------------------------------
 # Boucle principale : profondeur/batterie simulées + ODO + Spotify
@@ -423,17 +447,16 @@ async def simulate_boat_and_spotify():
             sp_client = await get_spotify_client()
             if sp_client:
                 try:
-                    current = sp_client.current_playback()
-                    item = current['item'] if current else None
-                    if item:
-                        # Un titre a 'artists' ; une pub ou un épisode de podcast
-                        # peut ne pas en avoir → on évite le KeyError.
-                        boat_data["music_title"]  = item.get('name', '')
-                        artists = item.get('artists') or []
-                        boat_data["music_artist"] = artists[0]['name'] if artists else ''
-                    else:
-                        boat_data["music_title"]  = "Pas de lecture en cours"
-                        boat_data["music_artist"] = ""
+                    # Appel réseau exécuté dans un thread avec timeout : un réseau
+                    # lent/coupé ne doit JAMAIS bloquer l'event loop (sinon jauges,
+                    # GPS et /api/status se figent toutes les 10 s).
+                    loop = asyncio.get_event_loop()
+                    title, artist = await asyncio.wait_for(
+                        loop.run_in_executor(None, _fetch_now_playing_sync, sp_client),
+                        timeout=6.0
+                    )
+                    boat_data["music_title"]  = title
+                    boat_data["music_artist"] = artist
                 except Exception as e:
                     diag["spotify_errors"] += 1
                     log.warning("Lecture Spotify échouée : %s", e)
