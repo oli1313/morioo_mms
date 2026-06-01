@@ -214,10 +214,13 @@ async def read_gps():
         try:
             raw = await loop.run_in_executor(None, gps_serial.readline)
             line = raw.decode('ascii', errors='ignore').strip()
-            if not line.startswith('$GPRMC'):
+            # Les puces GPS seul émettent $GPRMC ; les u-blox multi-constellation
+            # (GPS+GLONASS+Galileo) émettent $GNRMC. On accepte les deux, sinon
+            # aucun fix réel n'arrive jamais sur un module moderne.
+            if not line.startswith(('$GPRMC', '$GNRMC')):
                 continue
             parts = line.split(',')
-            # $GPRMC,hhmmss.ss,A,llll.ll,a,yyyyy.yy,a,x.x,x.x,ddmmyy,...
+            # $G[PN]RMC,hhmmss.ss,A,llll.ll,a,yyyyy.yy,a,x.x,x.x,ddmmyy,...
             if len(parts) < 8:
                 continue
             status = parts[2]   # A = fix valide, V = invalide
