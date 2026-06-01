@@ -424,9 +424,13 @@ async def simulate_boat_and_spotify():
             if sp_client:
                 try:
                     current = sp_client.current_playback()
-                    if current and current['item']:
-                        boat_data["music_title"]  = current['item']['name']
-                        boat_data["music_artist"] = current['item']['artists'][0]['name']
+                    item = current['item'] if current else None
+                    if item:
+                        # Un titre a 'artists' ; une pub ou un épisode de podcast
+                        # peut ne pas en avoir → on évite le KeyError.
+                        boat_data["music_title"]  = item.get('name', '')
+                        artists = item.get('artists') or []
+                        boat_data["music_artist"] = artists[0]['name'] if artists else ''
                     else:
                         boat_data["music_title"]  = "Pas de lecture en cours"
                         boat_data["music_artist"] = ""
@@ -571,7 +575,10 @@ def spotify_action(action: str, playlist_id: str = None):
 
 @app.get("/", response_class=HTMLResponse)
 def read_root():
-    content = Path("templates/index.html").read_text()
+    # Chemin absolu basé sur l'emplacement du script : la page racine se
+    # charge quel que soit le répertoire de lancement (sinon GET / renvoie
+    # un 500 si l'app n'est pas lancée depuis le dossier du repo).
+    content = (Path(__file__).parent / "templates" / "index.html").read_text()
     return HTMLResponse(content=content, headers={
         "Cache-Control": "no-store, no-cache, must-revalidate",
         "Pragma": "no-cache"
