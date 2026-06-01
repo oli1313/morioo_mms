@@ -71,29 +71,59 @@ arduino    = None
 gps_serial = None
 gps_has_fix = False
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global arduino, gps_serial
-    # --- Wemos D1 Mini (relais USB) ---
+WEMOS_PORT = '/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0'
+GPS_PORT   = '/dev/ttyACM0'
+
+
+def connect_arduino():
+    """(Re)connecte le Wemos. Laisse arduino à None s'il est absent (mode virtuel)."""
+    global arduino
     try:
-        arduino = serial.Serial(
-            port='/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0',
-            baudrate=115200, timeout=1
-        )
-        await asyncio.sleep(2)
+        arduino = serial.Serial(port=WEMOS_PORT, baudrate=115200, timeout=1)
         print("🚀 Connecté au Wemos D1 Mini !")
     except Exception as e:
         print(f"⚠️ Wemos non connecté : {e} — mode virtuel.")
         arduino = None
-    # --- GPS u-blox ---
+    return arduino
+
+
+def connect_gps():
+    """(Re)connecte le GPS. Laisse gps_serial à None s'il est absent (position simulée)."""
+    global gps_serial
     try:
-        gps_serial = serial.Serial('/dev/ttyACM0', baudrate=9600, timeout=1)
-        print("🛰️ GPS u-blox connecté sur /dev/ttyACM0")
+        gps_serial = serial.Serial(GPS_PORT, baudrate=9600, timeout=1)
+        print(f"🛰️ GPS u-blox connecté sur {GPS_PORT}")
     except Exception as e:
         print(f"⚠️ GPS non connecté : {e} — position simulée.")
         gps_serial = None
-    asyncio.create_task(read_gps())
-    asyncio.create_task(simulate_boat_and_spotify())
+    return gps_serial
+
+
+async def _supervise(name, coro_factory):
+    """Relance une boucle de fond si elle meurt sur une exception non gérée.
+
+    Sans ce garde-fou, une exception non rattrapée tue la tâche en silence :
+    uvicorn continue de répondre, systemd ne redémarre rien (le process n'a
+    pas crashé), et l'UI se fige sur la dernière valeur connue. On relance.
+    """
+    while True:
+        try:
+            await coro_factory()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"⚠️ Tâche '{name}' a planté : {e!r} — redémarrage dans 2 s.")
+            await asyncio.sleep(2)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    connect_arduino()
+    if arduino:
+        await asyncio.sleep(2)   # laisse le Wemos booter avant le premier write
+    connect_gps()
+    asyncio.create_task(_supervise("gps", read_gps))
+    asyncio.create_task(_supervise("boat", simulate_boat_and_spotify))
     yield
     if arduino:
         arduino.close()
@@ -205,12 +235,18 @@ def _parse_nmea_coord(raw, direction):
     return round(val, 6)
 
 async def read_gps():
-    global gps_has_fix
+    global gps_has_fix, gps_serial
     loop = asyncio.get_event_loop()
     while True:
         if not gps_serial:
-            await asyncio.sleep(5)
-            continue
+            # (Re)connexion à chaud : permet de brancher/rebrancher le GPS
+            # sans redémarrer le service.
+            await loop.run_in_executor(None, connect_gps)
+            if not gps_serial:
+                gps_has_fix = False
+                boat_data["gps_fix"] = False
+                await asyncio.sleep(5)
+                continue
         try:
             raw = await loop.run_in_executor(None, gps_serial.readline)
             line = raw.decode('ascii', errors='ignore').strip()
@@ -234,7 +270,17 @@ async def read_gps():
                 boat_data["vitesse"] = round(speed_knots, 1)
                 boat_data["gps_fix"] = True
                 gps_has_fix = True
-        except Exception:
+        except Exception as e:
+            # Port probablement perdu (USB débranché) : on l'invalide pour
+            # déclencher une reconnexion à la prochaine itération.
+            print(f"⚠️ Lecture GPS échouée : {e} — reconnexion.")
+            try:
+                gps_serial.close()
+            except Exception:
+                pass
+            gps_serial = None
+            gps_has_fix = False
+            boat_data["gps_fix"] = False
             await asyncio.sleep(1)
 
 # ---------------------------------------------------------------------------
@@ -279,8 +325,12 @@ async def simulate_boat_and_spotify():
         # Sauvegarde toutes les 30 secondes
         save_counter += 1
         if save_counter >= 30:
-            save_trip()
-            save_trail()
+            try:
+                save_trip()
+                save_trail()
+            except Exception as e:
+                # SD pleine, FS en lecture seule… ne doit pas tuer la boucle.
+                print(f"⚠️ Sauvegarde échouée : {e}")
             save_counter = 0
 
         # Polling Spotify toutes les 10 secondes
@@ -354,19 +404,45 @@ def reset_trip():
     save_trail()
     return {"status": "ok"}
 
+def _send_relay(state):
+    """Envoie l'état au relais Wemos, avec une reconnexion auto si le port est mort.
+    Retourne True si l'ordre a été physiquement envoyé, False si le Wemos est
+    indisponible (mode virtuel ou déconnecté)."""
+    global arduino
+    cmd = b"1" if state else b"0"
+    for _ in range(2):
+        if arduino is None:
+            connect_arduino()
+        if arduino is None:
+            return False
+        try:
+            arduino.write(cmd)
+            return True
+        except Exception as e:
+            print(f"⚠️ Écriture Wemos échouée : {e} — tentative de reconnexion.")
+            try:
+                arduino.close()
+            except Exception:
+                pass
+            arduino = None
+    return False
+
+
 @app.post("/api/switch/{device}")
 def switch_device(device: str):
-    if device == "feux_navigation":
-        boat_data["feux_navigation"] = not boat_data["feux_navigation"]
-        if arduino:
-            cmd = b"1" if boat_data["feux_navigation"] else b"0"
-            arduino.write(cmd)
-    elif device == "lumieres_sous_marines":
-        boat_data["lumieres_sous_marines"] = not boat_data["lumieres_sous_marines"]
-        if arduino:
-            cmd = b"1" if boat_data["lumieres_sous_marines"] else b"0"
-            arduino.write(cmd)
-    return {"status": "ok", "device": device, "state": boat_data.get(device)}
+    if device not in ("feux_navigation", "lumieres_sous_marines"):
+        return {"status": "error", "message": f"device inconnu : {device}"}
+    new_state = not boat_data[device]
+    sent = _send_relay(new_state)
+    # On bascule l'état logiciel dans tous les cas (UI utilisable en mode virtuel),
+    # mais on signale si l'ordre n'a pas pu être envoyé physiquement au relais.
+    boat_data[device] = new_state
+    return {
+        "status": "ok" if sent else "virtual",
+        "device": device,
+        "state": new_state,
+        "relay_sent": sent,
+    }
 
 @app.post("/api/spotify/{action}")
 def spotify_action(action: str, playlist_id: str = None):
