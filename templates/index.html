@@ -172,11 +172,6 @@
             ctx.fillText(minVal, cx - radius + 32, cy + radius - 32);
             ctx.fillText(maxVal, cx + radius - 32, cy + radius - 32);
 
-            // Grosse valeur numérique centrale
-            ctx.fillStyle = '#ffffff';
-            ctx.font = 'bold 36px Courier New';
-            ctx.fillText(value.toFixed(1), cx, cy + 10);
-
             // Calcul et dessin de l'Aiguille épaissie
             const percent = (value - minVal) / (maxVal - minVal);
             const needleAngle = startAngle + percent * (endAngle - startAngle);
@@ -197,6 +192,16 @@
             ctx.arc(cx, cy, 11, 0, 2 * Math.PI);
             ctx.fillStyle = '#8e6f43';
             ctx.fill();
+
+            // Valeur numérique : dessinée EN DERNIER (par-dessus l'aiguille et le
+            // moyeu) avec une ombre, pour rester lisible quoi que fasse l'aiguille.
+            ctx.save();
+            ctx.shadowColor = '#000000';
+            ctx.shadowBlur = 6;
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 36px Courier New';
+            ctx.fillText(value.toFixed(1), cx, cy + 10);
+            ctx.restore();
         }
 
         // --- REFRESH STATUS (1s) ---
