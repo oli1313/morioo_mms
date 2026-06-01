@@ -20,7 +20,7 @@ Dashboard tactile embarqué pour le *Boesch 510* (1964, V8 Crusader/Indmar). Tou
 |--------|-------------|
 | Backend | FastAPI (Python 3.13) + `pyserial` |
 | Frontend | HTML5 + Canvas + Leaflet + vanilla JS |
-| Matériel | Raspberry Pi 4, Carpuride, Wemos D1 Mini + shield relais |
+| Matériel | Raspberry Pi 3, Carpuride, Wemos D1 Mini + shield relais |
 | Musique | Spotify API via `spotipy` |
 
 ---
