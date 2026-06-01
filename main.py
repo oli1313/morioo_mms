@@ -22,15 +22,27 @@ REDIRECT_URI  = "http://127.0.0.1:8000/callback"
 SCOPE         = "user-modify-playback-state user-read-playback-state"
 REFRESH_TOKEN = os.getenv("SPOTIFY_REFRESH_TOKEN", "")
 
-sp_oauth = SpotifyOAuth(
-    client_id=CLIENT_ID,
-    client_secret=CLIENT_SECRET,
-    redirect_uri=REDIRECT_URI,
-    scope=SCOPE,
-    cache_path="/home/ode/boesch_os/.cache",
-    open_browser=False,
-    requests_timeout=5,   # évite les hangs réseau
-)
+def _build_sp_oauth():
+    """Construit le client OAuth Spotify, ou None si non configuré.
+
+    Sans cette garde, spotipy lève une exception dès l'import quand
+    client_id est vide (.env absent/incomplet) — et TOUT le backend refuse
+    alors de démarrer. On préfère démarrer sans Spotify (dégradation
+    gracieuse, comme pour le GPS/Wemos absents)."""
+    if not CLIENT_ID or not CLIENT_SECRET:
+        print("⚠️ Spotify non configuré (.env absent/incomplet) — fonctionnalité désactivée.")
+        return None
+    return SpotifyOAuth(
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        redirect_uri=REDIRECT_URI,
+        scope=SCOPE,
+        cache_path="/home/ode/boesch_os/.cache",
+        open_browser=False,
+        requests_timeout=5,   # évite les hangs réseau
+    )
+
+sp_oauth = _build_sp_oauth()
 
 # Cache du token en mémoire — refresh seulement quand expiré (~1×/heure)
 _spotify_token_info = None
@@ -38,7 +50,7 @@ _spotify_token_info = None
 def get_spotify_client_sync():
     """Retourne un client Spotipy prêt à l'emploi, ou None si impossible."""
     global _spotify_token_info, REFRESH_TOKEN
-    if not REFRESH_TOKEN:
+    if not sp_oauth or not REFRESH_TOKEN:
         return None
     try:
         if not _spotify_token_info or sp_oauth.is_token_expired(_spotify_token_info):
@@ -309,11 +321,15 @@ async def simulate_boat_and_spotify():
 # Les routes d'authentification
 @app.get("/login")
 def login():
+    if not sp_oauth:
+        return HTMLResponse("<h2>Spotify non configuré (.env manquant).</h2>", status_code=503)
     auth_url = sp_oauth.get_authorize_url()
     return RedirectResponse(auth_url)
 
 @app.get("/callback")
 def callback(request: Request):
+    if not sp_oauth:
+        return HTMLResponse("<h2>Spotify non configuré (.env manquant).</h2>", status_code=503)
     code = request.query_params.get("code")
     if not code:
         return HTMLResponse("<h2>Erreur : code manquant.</h2>", status_code=400)
