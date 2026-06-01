@@ -135,6 +135,43 @@
             color: '#ff4500', weight: 2, opacity: 0.5
         }).addTo(map);
 
+        // --- SUIVI DU BATEAU (façon Waze) ---
+        // followBoat=true : la carte garde le bateau centré en temps réel.
+        // Dès que l'utilisateur déplace/zoome la carte, le suivi se désengage et
+        // un bouton 🎯 apparaît pour le réengager. Le recentrage programmatique
+        // garde le même zoom → il ne déclenche pas le désengagement.
+        let followBoat = true;
+        let lastPos = null;
+        let recenterBtn = null;
+
+        function setFollow(on) {
+            followBoat = on;
+            if (recenterBtn) recenterBtn.style.display = on ? 'none' : 'block';
+        }
+
+        const RecenterControl = L.Control.extend({
+            options: { position: 'bottomright' },
+            onAdd: function () {
+                const btn = L.DomUtil.create('button', '');
+                btn.innerHTML = '🎯 Recentrer';
+                btn.title = 'Recentrer sur le bateau';
+                btn.style.cssText = 'background:#160e05;color:#d4a373;border:2px solid #8e6f43;'
+                    + 'border-radius:10px;padding:12px 16px;font-size:1em;font-weight:bold;'
+                    + 'cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.7);display:none;';
+                L.DomEvent.disableClickPropagation(btn);
+                L.DomEvent.on(btn, 'click', function () {
+                    setFollow(true);
+                    if (lastPos) map.setView(lastPos, map.getZoom());
+                });
+                recenterBtn = btn;
+                return btn;
+            }
+        });
+        map.addControl(new RecenterControl());
+
+        // L'utilisateur prend la main (drag ou zoom) → on arrête de suivre.
+        map.on('dragstart zoomstart', function () { setFollow(false); });
+
         // --- DESSIN DES JAUGES RÉTRO EN GRAND ---
         function drawGauge(canvasId, value, minVal, maxVal, colorNeedle) {
             const canvas = document.getElementById(canvasId);
@@ -218,12 +255,13 @@
 
                 if (data.lat && data.lon) {
                     var newPos = [data.lat, data.lon];
+                    lastPos = newPos;
                     boatMarker.setLatLng(newPos);
-                    // Recentrage uniquement quand le bateau approche du bord de
-                    // la vue : sinon la carte se recentre chaque seconde et on
-                    // ne peut plus la déplacer/zoomer au doigt.
-                    if (!map.getBounds().pad(-0.2).contains(newPos)) {
-                        map.panTo(newPos);
+                    // Mode suivi : le bateau reste centré, sans animation (pour ne
+                    // pas être nerveux). Désengagé dès que l'utilisateur touche la
+                    // carte ; le bouton 🎯 le réengage.
+                    if (followBoat) {
+                        map.setView(newPos, map.getZoom(), { animate: false });
                     }
                 }
 
