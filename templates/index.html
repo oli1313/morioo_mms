@@ -214,7 +214,12 @@
                 if (data.lat && data.lon) {
                     var newPos = [data.lat, data.lon];
                     boatMarker.setLatLng(newPos);
-                    map.panTo(newPos, 17);
+                    // Recentrage uniquement quand le bateau approche du bord de
+                    // la vue : sinon la carte se recentre chaque seconde et on
+                    // ne peut plus la déplacer/zoomer au doigt.
+                    if (!map.getBounds().pad(-0.2).contains(newPos)) {
+                        map.panTo(newPos);
+                    }
                 }
 
                 let gpsEl = document.getElementById('gps-indicator');
