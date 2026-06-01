@@ -1,6 +1,6 @@
 # CLAUDE.md — Morioo MMS
 
-Dashboard embarqué (Boesch 510) tournant sur Raspberry Pi 4, affiché en
+Dashboard embarqué (Boesch 510) tournant sur Raspberry Pi 3, affiché en
 kiosk Chromium sur un écran tactile Carpuride. Voir README.md pour le
 restore et l'usage.
 
@@ -15,7 +15,21 @@ sudo systemctl restart boesch_backend.service
 journalctl -u boesch_backend.service -f   # logs en direct
 ```
 
-Pas de tests automatisés. Validation = lancer le backend et ouvrir l'UI.
+### Tests
+
+Le projet vise **Python 3.13**. En dev, le matériel (Wemos/GPS) est absent
+→ l'app tourne en mode virtuel, ce qui suffit pour un smoke test :
+
+```bash
+python3.13 -m venv venv
+venv/bin/pip install -r requirements.txt httpx
+venv/bin/python tests/smoke_test.py     # démarre l'app + tape les routes
+```
+
+`tests/smoke_test.py` redirige les écritures vers `/tmp` (les chemins prod
+`/home/ode/boesch_os` n'existent pas en dev) et vérifie `/api/status`, les
+toggles relais (mode virtuel), le reset trip et `/api/trail`. La validation
+complète (série, GPS réel) ne se fait que sur le Pi.
 
 ## Architecture
 
@@ -47,6 +61,16 @@ Pas de tests automatisés. Validation = lancer le backend et ouvrir l'UI.
 - **Dégradation gracieuse** : Wemos ou GPS absents ⇒ mode virtuel, jamais
   de crash. Garder ce principe pour tout nouveau matériel.
 
+### Correctifs en cours (branches/PR séparées)
+
+- `fix/gps-gnrmc` — accepte `$GNRMC` en plus de `$GPRMC` (bug GPS ci-dessus).
+- `feat/resilience` — supervisor de tâches async, reconnexion série à chaud,
+  I/O protégées, `switch_device` fiable.
+- `perf/sd-card` — écritures SD rares / atomiques / conditionnelles.
+
+Une fois mergés, ces points passent de « piège » à « comportement acquis
+à préserver ».
+
 ## Contraintes Raspberry Pi (à respecter dans tout changement)
 
 - **Usure carte SD** : éviter les écritures fréquentes. `trip.json`/
@@ -56,6 +80,35 @@ Pas de tests automatisés. Validation = lancer le backend et ouvrir l'UI.
   réseau ; ne pas se fier à l'horloge pour de la logique critique.
 - **CPU/GPU limités** : le front redessine 3 jauges Canvas + recentre la
   carte chaque seconde. Ne pas alourdir la boucle de rendu.
+
+## Logging — À METTRE EN PLACE (sans tuer la carte SD)
+
+Objectif : pouvoir récupérer des logs après une sortie en bateau pour
+diagnostiquer un souci (et les transmettre pour analyse). Contrainte
+absolue : **ne jamais écrire les logs en continu sur la carte SD** (même
+raison que `trip.json`/`trail.json` — usure).
+
+Deux stratégies acceptables, l'une ou l'autre :
+
+1. **En continu mais en RAM (« doucement »)** — privilégier **journald** :
+   le backend écrit déjà sur stdout/stderr, donc `print(...)` / le module
+   `logging` sont captés par systemd. Pour éviter que journald n'use la SD,
+   passer le journal en RAM : `Storage=volatile` dans
+   `/etc/systemd/journald.conf` (logs perdus au reboot, mais récupérables
+   tant que le Pi tourne).
+2. **Dump unique à la demande (« en une fois »)** — bufferiser en RAM
+   (ou tmpfs) et n'écrire le fichier sur SD qu'**une seule fois**, sur
+   action manuelle ou au shutdown propre, jamais à chaque événement.
+
+Récupération pour analyse (à me transmettre ensuite) :
+
+```bash
+journalctl -u boesch_backend.service --since "today" > /tmp/mms.log
+# puis copier /tmp/mms.log (scp / clé USB) hors du Pi
+```
+
+Règle d'or : **aucune écriture de log à la seconde sur la SD**. Soit RAM en
+continu, soit un dump unique. À implémenter dans une PR dédiée.
 
 ## Résilience / éviter les plantages
 
