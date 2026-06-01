@@ -14,7 +14,31 @@ from spotipy.oauth2 import SpotifyOAuth
 
 from dotenv import load_dotenv
 import os
+import logging
+import time
 load_dotenv(Path(__file__).parent / ".env")
+
+# Logs vers stdout/stderr → captés par journald (journalctl -u boesch_backend).
+# Pour ne pas user la SD, configurer journald en Storage=volatile (cf. CLAUDE.md).
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("morioo")
+
+# Compteurs de diagnostic exposés via /api/diag. But : après une sortie en
+# bateau, récupérer (journalctl + /api/diag) de quoi comprendre ce qui s'est
+# passé — reconnexions matériel, pertes de fix GPS, erreurs d'I/O, etc.
+_STARTED_AT = time.time()
+diag = {
+    "gps_fix_acquired": 0,   # nb d'acquisitions de fix GPS
+    "gps_fix_lost": 0,       # nb de pertes de fix
+    "gps_reconnects": 0,     # nb de reconnexions du port GPS
+    "gps_read_errors": 0,    # nb d'erreurs de lecture GPS
+    "wemos_reconnects": 0,   # nb de reconnexions du Wemos
+    "relay_send_ok": 0,      # nb d'ordres relais envoyés avec succès
+    "relay_send_fail": 0,    # nb d'ordres relais non envoyés (Wemos absent)
+    "save_errors": 0,        # nb d'échecs de sauvegarde disque
+    "spotify_errors": 0,     # nb d'erreurs de lecture Spotify
+    "task_restarts": 0,      # nb de relances de boucle par le supervisor
+}
 
 CLIENT_ID     = os.getenv("SPOTIFY_CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
@@ -80,9 +104,9 @@ def connect_arduino():
     global arduino
     try:
         arduino = serial.Serial(port=WEMOS_PORT, baudrate=115200, timeout=1)
-        print("🚀 Connecté au Wemos D1 Mini !")
+        log.info("Connecté au Wemos D1 Mini")
     except Exception as e:
-        print(f"⚠️ Wemos non connecté : {e} — mode virtuel.")
+        log.warning("Wemos non connecté : %s — mode virtuel.", e)
         arduino = None
     return arduino
 
@@ -92,9 +116,9 @@ def connect_gps():
     global gps_serial
     try:
         gps_serial = serial.Serial(GPS_PORT, baudrate=9600, timeout=1)
-        print(f"🛰️ GPS u-blox connecté sur {GPS_PORT}")
+        log.info("GPS u-blox connecté sur %s", GPS_PORT)
     except Exception as e:
-        print(f"⚠️ GPS non connecté : {e} — position simulée.")
+        log.warning("GPS non connecté : %s — position simulée.", e)
         gps_serial = None
     return gps_serial
 
@@ -112,7 +136,8 @@ async def _supervise(name, coro_factory):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"⚠️ Tâche '{name}' a planté : {e!r} — redémarrage dans 2 s.")
+            diag["task_restarts"] += 1
+            log.error("Tâche '%s' a planté : %r — redémarrage dans 2 s.", name, e)
             await asyncio.sleep(2)
 
 
@@ -242,7 +267,9 @@ async def read_gps():
             # (Re)connexion à chaud : permet de brancher/rebrancher le GPS
             # sans redémarrer le service.
             await loop.run_in_executor(None, connect_gps)
-            if not gps_serial:
+            if gps_serial:
+                diag["gps_reconnects"] += 1
+            else:
                 gps_has_fix = False
                 boat_data["gps_fix"] = False
                 await asyncio.sleep(5)
@@ -258,6 +285,9 @@ async def read_gps():
                 continue
             status = parts[2]   # A = fix valide, V = invalide
             if status != 'A':
+                if gps_has_fix:
+                    diag["gps_fix_lost"] += 1
+                    log.info("Perte du fix GPS")
                 gps_has_fix = False
                 boat_data["gps_fix"] = False
                 continue
@@ -265,6 +295,9 @@ async def read_gps():
             lon = _parse_nmea_coord(parts[5], parts[6])
             speed_knots = float(parts[7]) if parts[7] else 0.0
             if lat is not None and lon is not None:
+                if not gps_has_fix:
+                    diag["gps_fix_acquired"] += 1
+                    log.info("Fix GPS acquis (%.6f, %.6f)", lat, lon)
                 boat_data["lat"]     = lat
                 boat_data["lon"]     = lon
                 boat_data["vitesse"] = round(speed_knots, 1)
@@ -273,7 +306,8 @@ async def read_gps():
         except Exception as e:
             # Port probablement perdu (USB débranché) : on l'invalide pour
             # déclencher une reconnexion à la prochaine itération.
-            print(f"⚠️ Lecture GPS échouée : {e} — reconnexion.")
+            diag["gps_read_errors"] += 1
+            log.warning("Lecture GPS échouée : %s — reconnexion.", e)
             try:
                 gps_serial.close()
             except Exception:
@@ -330,7 +364,8 @@ async def simulate_boat_and_spotify():
                 save_trail()
             except Exception as e:
                 # SD pleine, FS en lecture seule… ne doit pas tuer la boucle.
-                print(f"⚠️ Sauvegarde échouée : {e}")
+                diag["save_errors"] += 1
+                log.error("Sauvegarde échouée : %s", e)
             save_counter = 0
 
         # Polling Spotify toutes les 10 secondes
@@ -347,7 +382,9 @@ async def simulate_boat_and_spotify():
                     else:
                         boat_data["music_title"]  = "Pas de lecture en cours"
                         boat_data["music_artist"] = ""
-                except Exception:
+                except Exception as e:
+                    diag["spotify_errors"] += 1
+                    log.warning("Lecture Spotify échouée : %s", e)
                     boat_data["music_title"]  = "Erreur de lecture"
                     boat_data["music_artist"] = ""
             else:
@@ -394,6 +431,18 @@ def get_status():
 def get_trail():
     return trail
 
+@app.get("/api/diag")
+def get_diag():
+    """Compteurs de diagnostic + uptime. À consulter (ou logger) après une
+    sortie pour repérer reconnexions, pertes de fix, erreurs d'I/O, etc."""
+    return {
+        **diag,
+        "uptime_s": round(time.time() - _STARTED_AT, 1),
+        "gps_fix": boat_data["gps_fix"],
+        "wemos_connected": arduino is not None,
+        "gps_connected": gps_serial is not None,
+    }
+
 @app.post("/api/trip/reset")
 def reset_trip():
     trip_data["km"] = 0.0
@@ -414,17 +463,21 @@ def _send_relay(state):
         if arduino is None:
             connect_arduino()
         if arduino is None:
+            diag["relay_send_fail"] += 1
             return False
         try:
             arduino.write(cmd)
+            diag["relay_send_ok"] += 1
             return True
         except Exception as e:
-            print(f"⚠️ Écriture Wemos échouée : {e} — tentative de reconnexion.")
+            diag["wemos_reconnects"] += 1
+            log.warning("Écriture Wemos échouée : %s — tentative de reconnexion.", e)
             try:
                 arduino.close()
             except Exception:
                 pass
             arduino = None
+    diag["relay_send_fail"] += 1
     return False
 
 
