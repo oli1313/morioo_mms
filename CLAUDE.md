@@ -35,10 +35,13 @@ complète (série, GPS réel) ne se fait que sur le Pi.
 
 - `main.py` — backend FastAPI mono-fichier. Tout l'état vit dans le dict
   global `boat_data` + `trip_data` + `trail`. Deux boucles async lancées
-  au `lifespan` :
-  - `read_gps()` — parse les trames NMEA RMC du GPS u-blox.
+  au `lifespan` via le supervisor `_supervise` (qui les relance si elles
+  plantent) :
+  - `read_gps()` — parse les trames NMEA RMC (`$GPRMC`/`$GNRMC`) du GPS
+    u-blox, avec reconnexion à chaud du port.
   - `simulate_boat_and_spotify()` — profondeur/batterie simulées, ODO,
     position simulée si pas de fix GPS, polling Spotify.
+  - Diagnostic exposé sur `/api/diag` (compteurs + uptime).
 - `templates/index.html` — UI complète (vanilla JS + Canvas + Leaflet).
   Poll `/api/status` chaque seconde, `/api/trail` toutes les 5 s.
 - `relais_usb/relais_usb.ino` — firmware Wemos D1 Mini : lit '1'/'0' sur
@@ -53,23 +56,26 @@ complète (série, GPS réel) ne se fait que sur le Pi.
 - **`boat_data["vitesse"]` est en NŒUDS**, pas en km/h. Le front
   re-multiplie par 1.852 pour l'affichage. Ne pas convertir deux fois.
 - **GPS** : les u-blox multi-constellation émettent `$GNRMC`, pas
-  forcément `$GPRMC`. Le filtre doit accepter les deux, sinon le fix
-  réel n'arrive jamais.
+  forcément `$GPRMC`. Le filtre accepte désormais les deux (sinon le fix
+  réel n'arrive jamais) — acquis sur `main`, à préserver.
 - **Spotify redirect URI** = `http://127.0.0.1:8000/callback`. L'auth
   (`/login`) doit se faire DEPUIS le Pi, ou bien aligner l'URI sur l'IP
   réelle ET la déclarer dans le dashboard Spotify.
 - **Dégradation gracieuse** : Wemos ou GPS absents ⇒ mode virtuel, jamais
   de crash. Garder ce principe pour tout nouveau matériel.
 
-### Correctifs en cours (branches/PR séparées)
+### Correctifs intégrés sur `main`
 
-- `fix/gps-gnrmc` — accepte `$GNRMC` en plus de `$GPRMC` (bug GPS ci-dessus).
-- `feat/resilience` — supervisor de tâches async, reconnexion série à chaud,
-  I/O protégées, `switch_device` fiable.
-- `perf/sd-card` — écritures SD rares / atomiques / conditionnelles.
+Ces points étaient des « pièges » ; ils sont désormais **mergés sur `main`**
+et deviennent du comportement acquis à préserver :
 
-Une fois mergés, ces points passent de « piège » à « comportement acquis
-à préserver ».
+- `$GNRMC` accepté en plus de `$GPRMC` (bug GPS ci-dessus).
+- Supervisor de tâches async, reconnexion série à chaud, I/O protégées,
+  `switch_device` fiable (renvoie `status: virtual` si le relais est absent).
+- Écritures SD rares / atomiques (`.tmp`→rename) / conditionnelles
+  (drapeaux *dirty*), via `SAVE_INTERVAL`.
+- Spotify optionnel : l'app démarre même sans `.env`.
+- Logging structuré + endpoint `/api/diag` (compteurs de diagnostic).
 
 ## Contraintes Raspberry Pi (à respecter dans tout changement)
 
@@ -81,7 +87,7 @@ Une fois mergés, ces points passent de « piège » à « comportement acquis
 - **CPU/GPU limités** : le front redessine 3 jauges Canvas + recentre la
   carte chaque seconde. Ne pas alourdir la boucle de rendu.
 
-## Logging — À METTRE EN PLACE (sans tuer la carte SD)
+## Logging (en place — sans tuer la carte SD)
 
 Objectif : pouvoir récupérer des logs après une sortie en bateau pour
 diagnostiquer un souci (et les transmettre pour analyse). Contrainte
@@ -90,10 +96,10 @@ raison que `trip.json`/`trail.json` — usure).
 
 Deux stratégies acceptables, l'une ou l'autre :
 
-1. **En continu mais en RAM (« doucement »)** — privilégier **journald** :
-   le backend écrit déjà sur stdout/stderr, donc `print(...)` / le module
-   `logging` sont captés par systemd. Pour éviter que journald n'use la SD,
-   passer le journal en RAM : `Storage=volatile` dans
+1. **En continu mais en RAM (« doucement »)** — approche **retenue et en
+   place** : le backend logge via le module `logging` (`logger "morioo"`)
+   sur stdout/stderr, capté par journald. Reste l'étape ops côté Pi : passer
+   le journal en RAM avec `Storage=volatile` dans
    `/etc/systemd/journald.conf` (logs perdus au reboot, mais récupérables
    tant que le Pi tourne).
 2. **Dump unique à la demande (« en une fois »)** — bufferiser en RAM
@@ -107,14 +113,19 @@ journalctl -u boesch_backend.service --since "today" > /tmp/mms.log
 # puis copier /tmp/mms.log (scp / clé USB) hors du Pi
 ```
 
-Règle d'or : **aucune écriture de log à la seconde sur la SD**. Soit RAM en
-continu, soit un dump unique. À implémenter dans une PR dédiée.
+Règle d'or : **aucune écriture de log à la seconde sur la SD**. Le logging
+applicatif (option 1) est en place ; reste à configurer `Storage=volatile`
+côté Pi.
 
 ## Résilience / éviter les plantages
 
 Principe clé : une boucle async qui lève une exception non rattrapée
 meurt en silence — uvicorn continue de servir, donc `systemd` ne
 redémarre rien et l'UI fige sur la dernière valeur. À éviter absolument.
+
+Les garde-fous ci-dessous sont **implémentés sur `main`** (supervisor
+`_supervise`, écritures atomiques, reconnexion série) : c'est le comportement
+à préserver, pas du travail à faire.
 
 - Toute I/O fichier (`save_trip`, `save_trail`, lecture/écriture `.env`)
   doit être protégée par try/except + écriture atomique (`.tmp` → rename).
