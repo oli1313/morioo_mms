@@ -16,7 +16,24 @@ from dotenv import load_dotenv
 import os
 import logging
 import time
+import socket
 load_dotenv(Path(__file__).parent / ".env")
+
+
+def _sd_notify(state):
+    """Notifie systemd (protocole sd_notify). No-op hors systemd, c.-à-d. quand
+    NOTIFY_SOCKET est absent (dev local) — donc sans effet de bord."""
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr:
+        return
+    if addr[0] == '@':            # socket abstrait
+        addr = '\0' + addr[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+            sock.connect(addr)
+            sock.sendall(state.encode())
+    except Exception:
+        pass
 
 # Logs vers stdout/stderr → captés par journald (journalctl -u boesch_backend).
 # Pour ne pas user la SD, configurer journald en Storage=volatile (cf. CLAUDE.md).
@@ -177,6 +194,7 @@ async def lifespan(app: FastAPI):
     connect_gps()
     asyncio.create_task(_supervise("gps", read_gps))
     asyncio.create_task(_supervise("boat", simulate_boat_and_spotify))
+    _sd_notify("READY=1")   # ignoré si le service n'est pas en Type=notify
     yield
     # Sauvegarde finale à l'arrêt propre : comme on écrit moins souvent en
     # marche, on garantit au moins une écriture des dernières données ici.
@@ -385,6 +403,11 @@ async def simulate_boat_and_spotify():
     save_counter    = 0
     spotify_counter = 0
     while True:
+        # Watchdog : on signale à systemd qu'on est vivant à chaque tour. Si
+        # cette boucle se fige (réseau bloquant, deadlock…), le ping s'arrête et
+        # systemd redémarre le service (WatchdogSec dans le .service).
+        _sd_notify("WATCHDOG=1")
+
         # Profondeur et batterie : toujours simulées (pas de capteur réel)
         boat_data["profondeur"] = round(random.uniform(2.0, 8.0), 1)
         boat_data["batterie"]   = round(random.uniform(12.4, 13.1), 2)
