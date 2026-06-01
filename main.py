@@ -95,6 +95,13 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(read_gps())
     asyncio.create_task(simulate_boat_and_spotify())
     yield
+    # Sauvegarde finale à l'arrêt propre : comme on écrit moins souvent en
+    # marche, on garantit au moins une écriture des dernières données ici.
+    try:
+        save_trip()
+        save_trail()
+    except Exception as e:
+        print(f"⚠️ Sauvegarde finale échouée : {e}")
     if arduino:
         arduino.close()
     if gps_serial:
@@ -115,8 +122,19 @@ def load_trip():
             pass
     return {"km": 0.0, "nm": 0.0, "secondes": 0}
 
+# Intervalle d'écriture sur disque (s). Compromis entre usure de la carte SD
+# (écrire le moins souvent possible) et perte de données sur coupure brutale.
+SAVE_INTERVAL = 60
+
+def _atomic_write(path, text):
+    """Écrit dans un fichier temporaire puis rename atomique : évite de laisser
+    un .json tronqué/corrompu si une coupure survient pendant l'écriture."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    tmp.replace(path)
+
 def save_trip():
-    TRIP_FILE.write_text(json.dumps(trip_data))
+    _atomic_write(TRIP_FILE, json.dumps(trip_data))
 
 trip_data = load_trip()
 
@@ -131,7 +149,7 @@ def load_trail():
     return []
 
 def save_trail():
-    TRAIL_FILE.write_text(json.dumps(trail))
+    _atomic_write(TRAIL_FILE, json.dumps(trail))
 
 # --- Simulation fallback (utilisée quand GPS absent) ---
 MEUSE_ROUTE = [
@@ -172,6 +190,8 @@ def _pos_at_km(km):
 
 _route_km  = 0.0
 _route_dir = 1
+_trip_dirty  = False   # données ODO modifiées depuis la dernière sauvegarde
+_trail_dirty = False   # trace modifiée depuis la dernière sauvegarde
 
 # Trace GPS (max 600 points ≈ 10 min)
 trail = load_trail()
@@ -241,7 +261,7 @@ async def read_gps():
 # Boucle principale : profondeur/batterie simulées + ODO + Spotify
 # ---------------------------------------------------------------------------
 async def simulate_boat_and_spotify():
-    global _route_km, _route_dir
+    global _route_km, _route_dir, _trip_dirty, _trail_dirty
     save_counter    = 0
     spotify_counter = 0
     while True:
@@ -265,22 +285,32 @@ async def simulate_boat_and_spotify():
         else:
             vitesse_kmh = boat_data["vitesse"] * 1.852
 
-        # Trace
-        trail.append([boat_data["lat"], boat_data["lon"]])
-        if len(trail) > 600:
-            trail.pop(0)
+        # Trace : on n'ajoute un point que s'il diffère du précédent (évite les
+        # doublons à l'arrêt et limite la croissance du fichier).
+        pt = [boat_data["lat"], boat_data["lon"]]
+        if not trail or trail[-1] != pt:
+            trail.append(pt)
+            if len(trail) > 600:
+                trail.pop(0)
+            _trail_dirty = True
 
         # ODO : incrémente seulement si vitesse > 1 km/h
         if vitesse_kmh > 1.0:
             trip_data["km"]       = round(trip_data["km"] + vitesse_kmh / 3600, 4)
             trip_data["nm"]       = round(trip_data["nm"] + boat_data["vitesse"] / 3600, 4)
             trip_data["secondes"] += 1
+            _trip_dirty = True
 
-        # Sauvegarde toutes les 30 secondes
+        # Sauvegarde périodique, et seulement si quelque chose a changé :
+        # un bateau à l'arrêt n'écrit plus rien sur la SD.
         save_counter += 1
-        if save_counter >= 30:
-            save_trip()
-            save_trail()
+        if save_counter >= SAVE_INTERVAL:
+            if _trip_dirty:
+                save_trip()
+                _trip_dirty = False
+            if _trail_dirty:
+                save_trail()
+                _trail_dirty = False
             save_counter = 0
 
         # Polling Spotify toutes les 10 secondes
