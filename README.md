@@ -117,5 +117,45 @@ Le port est fixé via udev : le Wemos (chip CH340, `idVendor=1a86`) est toujours
 
 ---
 
+## Roadmap — idées de fonctionnalités
+
+Classées de la plus intéressante à la moins, du point de vue du propriétaire
+du *Boesch 510* (balades sur la Meuse, sécurité, confort à bord).
+
+### 🛟 Sécurité (priorité haute)
+1. **⚓ Alarme de mouillage (anchor watch)** — on pose l'ancre, l'app mémorise
+   la position GPS ; si le bateau dérive au-delà d'un rayon réglable, alarme
+   visuelle + sonore. *Le grand classique, évite de finir sur la berge.*
+2. **🌊 Alarme de hauts-fonds** — alerte dès que la profondeur passe sous un
+   seuil réglable (dès que le sondeur réel sera branché). *La Meuse a des
+   zones peu profondes — protège l'hélice et la coque.*
+3. **🌡️ Surveillance moteur** — température eau/moteur du V8 Crusader, avec
+   alerte surchauffe. *Un V8 ancien qui chauffe = panne au milieu de l'eau.*
+4. **🔋 Surveillance batterie réelle** — tension mesurée + alerte décharge
+   (au lieu de la valeur simulée actuelle).
+
+### 🧭 Navigation (priorité moyenne)
+5. **🧭 Cap (COG) + heure depuis le GPS** — boussole de route, et heure juste
+   même sans connexion ni horloge matérielle (RTC).
+6. **📊 Statistiques de sortie** — vitesse max / moyenne, durée, distance,
+   affichées en direct et conservées par sortie.
+7. **🗺️ Historique des sorties + export GPX** — revoir et partager ses
+   trajets (compatible Google Earth, OpenCPN…).
+
+### 😎 Confort & plaisir (priorité basse)
+8. **🌙 Mode jour / nuit** — atténuation automatique de l'écran le soir
+   (confort visuel, ne pas être ébloui en navigation nocturne).
+9. **📡 Météo & niveau de la Meuse** — conditions et hauteur d'eau en temps
+   réel quand une connexion est disponible.
+10. **📷 Caméra de poupe** — aide à l'accostage et à la marche arrière.
+11. **🎚️ Contrôle couleur OceanLED** — choix de couleur/ambiance des
+    projecteurs sous-marins (déjà au TODO).
+
+> Chaque fonctionnalité doit respecter les principes du projet : dégradation
+> gracieuse (jamais de crash si un capteur manque) et écritures SD minimales
+> (cf. `CLAUDE.md`).
+
+---
+
 ## Licence
 Projet privé — usage personnel sur le *Boesch 510*. Redistribution interdite sans autorisation explicite.
