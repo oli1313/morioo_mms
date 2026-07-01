@@ -444,7 +444,7 @@ async def simulate_boat_and_spotify():
             boat_data["pompe_timer"] -= 1
             if boat_data["pompe_timer"] == 0:
                 boat_data["pompe_de_cale"] = False
-                _send_relay(False)
+                _send_relay("pompe_de_cale", False)
                 log.info("Pompe de cale : arrêt automatique après 30 s")
 
 
@@ -573,12 +573,22 @@ def reset_trip():
     save_trail()
     return {"status": "ok"}
 
-def _send_relay(state):
-    """Envoie l'état au relais Wemos, avec une reconnexion auto si le port est mort.
+# Canal série de chaque relais : le firmware Wemos pilote DEUX relais adressés
+# indépendamment (« P » = pompe, « L » = feux). Sans ce préfixe, les deux
+# dispositifs partageraient le même relais et s'écraseraient mutuellement.
+_RELAY_CHANNEL = {"pompe_de_cale": b"P", "lumieres_sous_marines": b"L"}
+
+
+def _send_relay(device, state):
+    """Envoie l'état au relais Wemos du `device` (pompe ou feux), avec une
+    reconnexion auto si le port est mort. Commande = préfixe de canal + '1'/'0'.
     Retourne True si l'ordre a été physiquement envoyé, False si le Wemos est
     indisponible (mode virtuel ou déconnecté)."""
     global arduino
-    cmd = b"1" if state else b"0"
+    prefix = _RELAY_CHANNEL.get(device)
+    if prefix is None:
+        return False   # device sans relais — ne devrait pas arriver (validé en amont)
+    cmd = prefix + (b"1" if state else b"0")
     for _ in range(2):
         if arduino is None:
             connect_arduino()
@@ -612,12 +622,12 @@ def switch_device(device: str):
         if boat_data["pompe_de_cale"]:
             boat_data["pompe_de_cale"] = False
             boat_data["pompe_timer"]   = 0
-            sent = _send_relay(False)
+            sent = _send_relay("pompe_de_cale", False)
             log.info("Pompe de cale : arrêt manuel")
         else:
             boat_data["pompe_de_cale"] = True
             boat_data["pompe_timer"]   = 30
-            sent = _send_relay(True)
+            sent = _send_relay("pompe_de_cale", True)
             log.info("Pompe de cale : démarrage (30 s)")
         return {
             "status": "ok" if sent else "virtual",
@@ -629,7 +639,7 @@ def switch_device(device: str):
 
     # lumieres_sous_marines : toggle classique
     new_state = not boat_data[device]
-    sent = _send_relay(new_state)
+    sent = _send_relay(device, new_state)
     boat_data[device] = new_state
     return {
         "status": "ok" if sent else "virtual",

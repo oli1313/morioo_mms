@@ -193,9 +193,14 @@ Préférence sauvegardée en `localStorage`. La carte swap entre tuiles CartoDB 
 
 ## Wemos D1 Mini — Firmware
 
-Le sketch `relais_usb.ino` écoute sur le port série (115200 baud) :
-- `1` → relais ON (lumières)
-- `0` → relais OFF
+Le sketch `relais_usb.ino` pilote **deux relais adressés indépendamment** et
+écoute sur le port série (115200 baud) des commandes de 2 caractères :
+- `P1` / `P0` → relais **pompe de cale** ON / OFF (broche D1)
+- `L1` / `L0` → relais **feux sous-marins** ON / OFF (broche D2)
+
+Le préfixe de canal (`P`/`L`) évite que pompe et feux se partagent — et
+s'écrasent — le même relais. Le backend envoie ces 2 octets via
+`_send_relay(device, state)`.
 
 Port fixé via udev : `/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`.
 

@@ -40,7 +40,11 @@ object ApiClient {
     fun getStatus(): BoatData? {
         val j = get("/api/status") ?: return null
         val trip   = j.optJSONObject("trip")
-        val anchor = j.optJSONObject("anchor")
+        // L'état d'ancre est exposé par le MODULE anchor_watch sur son propre
+        // endpoint /api/anchor — /api/status (le cœur) ne le contient PAS. On
+        // l'interroge séparément ; null si le module est absent (dégradation
+        // gracieuse : l'ancre s'affiche alors comme inactive).
+        val anchor = get("/api/anchor")
 
         // Météo depuis /api/weather (cache 60 s, on absorbe les erreurs)
         val w = getWeather()

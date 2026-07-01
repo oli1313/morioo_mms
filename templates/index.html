@@ -735,9 +735,16 @@
         async function toggleSwitch(device) {
             if (_switchLock[device]) return;
             _switchLock[device] = true;
-            await fetch(`/api/switch/${device}`, { method: 'POST' });
-            refreshData();
-            setTimeout(() => { _switchLock[device] = false; }, 800);
+            try {
+                await fetch(`/api/switch/${device}`, { method: 'POST' });
+                refreshData();
+            } catch (_) {
+                // Réseau bateau instable : ne JAMAIS laisser le bouton verrouillé
+                // sur une erreur, sinon la pompe/les feux deviennent inertes
+                // jusqu'au rechargement de la page.
+            } finally {
+                setTimeout(() => { _switchLock[device] = false; }, 800);
+            }
         }
         async function resetTrip() {
             await fetch('/api/trip/reset', { method: 'POST' });
